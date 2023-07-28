@@ -6,21 +6,50 @@
 //mc fault
 //bms fault
 
-#include <mcp_can.h>
+//--------------------------------------------provides canbus and mcp interface-----------------------------------
+#include <mcp_can.h>  
 #include <mcp_can_dfs.h>
 #include <SPI.h>
-#include<SoftwareSerial.h>
-SoftwareSerial HC12(10,11);
 
-//defining some variables
-const int SPI_CS_PIN = 53;
+//--------------------------------------------provides telemetry-----------------------------------
+#include<SoftwareSerial.h>
+
+//--------------------------------------------declare hc12 pins-----------------------------------
+SoftwareSerial telemetrySerial(5,3); // Create a software serial object for telemetry transmission
+                                     //tx pin = 5 , rx pin = 3 
+//SoftwareSerial HC12(5,6);
+
+//--------------------------------------------data encapsulation-----------------------------------
+// basically initialize a class for telemetry
+struct TelemetryData { // Define a struct to hold the telemetry data
+  double mctempmotor = 0;
+  double mctempcontroller = 0;
+  double mcerpm = 0;
+  double mcthrottle = 0;
+  double pack_current = 0;
+  double pack_inst_voltage = 0;
+  double state_of_charge = 0;
+  double high_temp = 0;
+  double low_temp = 0;
+  double mcaccurrent = 0;
+  double speed = 0;
+  double lv = 0;
+};
+
+//--------------------------------------------defining some variables----------------------------------
+const int SPI_CS_PIN = 10;
 unsigned char len = 8;
 unsigned char buf[8] = {0};
-long unsigned int rxId;
+long unsigned int rxId; //determine priority order(identity) of canbus data
+
 double mctempmotor = 0;
 double mcerpm = 0;
 double mcthrottle = 0;
 double mctempcontroller = 0;
+double speed = 0;
+double mcaccurrent = 0 ;
+double mcdccurrent = 0;
+double mcvoltage = 0;
 String mcfault = "Searching";
 
 //BMS Variables
@@ -29,6 +58,7 @@ double pack_inst_voltage = 0;
 double state_of_charge = 0;
 double high_temp = 0;
 double low_temp = 0;
+double lv = 0;
 
 //MFR Variables
 volatile int sensor_frequency;
@@ -38,11 +68,10 @@ unsigned long present_time;
 unsigned long closedlooptime;
 
 
-
-//defining CS pin
+//--------------------------------------------initializing CS pin----------------------------------
 MCP_CAN CAN(SPI_CS_PIN);
 
-
+//--------------------------------------------funtions to convert base of numbers----------------------------------
 //defining two funstions that convert decimal to hexadecimal and vice versa
 int hexToDec(String hexString) {
   int decimalValue = 0;
@@ -98,24 +127,35 @@ void flow(){
   sensor_frequency++;
 }
 
-//setup
+//--------------------------------------------creating void setup----------------------------------
+//void setup contains the code we want to run only once when the arduino is initially started
+//while void loop is the code that is played in loop
 void setup()
 {
-  Serial.begin(9600);
-  HC12.begin(9600);
+  //pinMode(3, OUTPUT);
+  Serial.begin(460800);
+  telemetrySerial.begin(460800);
+
+//making sure code only proceeds when data is coming from serial  
   while (!Serial);
 
+//can_ok is a function that fails when arduino to mcp connections are not proper
   if (CAN_OK != CAN.begin(MCP_ANY, CAN_500KBPS, MCP_8MHZ))
   {
-    //Serial.println("CAN BUS FAIL!");
+    Serial.println("CAN BUS FAIL!");
     while (1) delay(100);
   }
   else {
-    //Serial.println("CAN BUS OK!");
+    Serial.println("CAN BUS OK!");
     delay(500);
   }
+  //Serial.println("11");
   CAN.setMode(MCP_NORMAL);
-  pinMode(2, INPUT);
+  //Serial.println("22");
+  pinMode(2, INPUT); //declaring input pin (INT) //--------------------------------------------very important----------------------------------
+                                                 //be careful here CS pin and INT pin numbers are different for uno and mega
+                                                 //check the valid pins on google
+  //mfr
   pinMode(flowmeter,INPUT);
   attachInterrupt(0,flow,RISING);
   sei();
@@ -124,34 +164,57 @@ void setup()
 }
 
 
+//--------------------------------------------creating void setup----------------------------------
+//void setup contains the code we want to run only once when the arduino is initially started
+//while void loop is the code that is played in loop
+
 void loop()
 { 
+  //digitalWrite(3, HIGH);
   // check if data coming
   if (CAN_MSGAVAIL == CAN.checkReceive())
   {
-    if (!digitalRead(2)){
+    if (1){   // that is - true
       //read data
-      CAN.readMsgBuf(&rxId, &len, buf);
+      CAN.readMsgBuf(&rxId, &len, buf); // buf is a datatype similar to array to store the incoming data
     }
 
-    long unsigned int rxId0 = rxId & 0x1FFFFFFF;
+    // for (int i=0; i<=7; i++){
+    //   Serial.println(buf[i]);
+    // }
+
+
+    //--------------------------------------------extracting useful data from the identifier----------------------------------
+    
+    long unsigned int rxId0 = rxId & 0x1FFFFFFF; //Converting the 32 bit id received via mcp into 29 bit id that the canbus wanted to give us
+                                                 //this is important because the coding language (datatypes) works on 32bit while our canbus works on 29bit
+                                                 // 0x1FFFFFFF = 00011111 11111111 11111111 11111111
+                                                 // rxId = 32 bits
+                                                 // when we take binary and we make the variable rxid0 whose left 3 bits are zeros
+    //rxid consists of 2 parts - packet id and node id
+    //packet id tells data incoming
+    //node id tells sensor sending
     long unsigned int Packet_id = (rxId0 >> 8);
     long unsigned int Node_id = (rxId0 & 0xFF);
 
-    //Converting decimal data into hexadecimal strings
+    //Converting decimal data that was earlier stored into buf datatype into hexadecimal strings
     String hex1 = decToHex(buf[0]);
     String hex2 = decToHex(buf[1]);
     String hex3 = decToHex(buf[2]);
     String hex4 = decToHex(buf[3]);
     String hex5 = decToHex(buf[4]);
-    
+    String hex6 = decToHex(buf[5]);
+    String hex7 = decToHex(buf[6]);
+    String hex8 = decToHex(buf[7]);
 
     //some variables
     int bms_fault_check = 0;
 
     //Converting data into useable form
+    TelemetryData data;
 
-    //MC Code
+//--------------------------------------------MC code----------------------------------
+// to recieve a specific data from the MC refer to HV-500 CAN Manual 2.3 section 3.2 Description of transmitted signals by the inverter
     if (Packet_id == 2){
       
       //Motor Temperature
@@ -203,6 +266,10 @@ void loop()
     if (Packet_id == 0){
       String mcerpmhex = hex1+hex2+hex3+hex4;
       mcerpm = hexToDec(mcerpmhex);
+      speed = (mcerpm/10)*2*3.14;
+
+      String volt = hex7 + hex8;
+      mcvoltage = hexToDec(volt);
     }
 
     //Throttle
@@ -210,8 +277,12 @@ void loop()
       mcthrottle = buf[0];
     }
 
+    if (Packet_id == 1){
+      String dc = hex1 + hex2;
+      mcdccurrent = hexToDec(dc)/10.0;
+    }
 
-    //BMS CODE
+//--------------------------------------------BMS code----------------------------------
     if(rxId==2147485360){
 
       //CURRENT
@@ -223,24 +294,64 @@ void loop()
       pack_inst_voltage=(hexToDec(v))/10;
       
       //STATE OF CHARGE      
-      state_of_charge = buf[4]/2;
+      state_of_charge =buf[4]/2.0;
       
       //TEMPERATURE
       high_temp = buf[5];
       low_temp = buf[6];
     }
+    if (rxId==2147485361){
+      String l = hex5 + hex6;
+      lv=(hexToDec(l))/10.0;
+    }
 
+    //--------------------------------------------telemetry in action----------------------------------
+    //assigning varibles to structure
+    data.mctempmotor = mctempmotor;
+    data.mctempcontroller = mctempcontroller;
+    data.mcerpm = mcerpm;
+    data.mcthrottle = mcthrottle;
+    data.pack_current = pack_current;
+    data.pack_inst_voltage = pack_inst_voltage;
+    data.state_of_charge = state_of_charge;
+    data.high_temp = high_temp;
+    data.low_temp = low_temp;
+    data.speed = speed;
+    data.mcaccurrent = mcaccurrent;
 
+    //converting above structure to byte datatype
+    byte dataBytes[sizeof(data)];
+    memcpy(dataBytes, &data, sizeof(data));
+      
+
+    // Transmit the encapsulated telemetry data
+    telemetrySerial.write(dataBytes, sizeof(dataBytes));
+  
+    //telemetrySerial.print(data.pack_current);
+    //telemetrySerial.print(",");
+    //telemetrySerial.print(data.pack_inst_voltage);
+    //telemetrySerial.print(",");
+    //telemetrySerial.print(data.state_of_charge);
+    //telemetrySerial.print(",");
+    //telemetrySerial.print(data.high_temp);
+    //telemetrySerial.print(",");
+    //telemetrySerial.print(data.low_temp);
+  
+  
+   // Wait for 1 second before sending the next telemetry packet
+
+   //--------------------------------------------sending data to serial monitor----------------------------------
     //Printing MC data
     Serial.print(mctempmotor);
-    Serial.print("° C");
     Serial.print(",");
 
     Serial.print(mctempcontroller);
-    Serial.print("° C");
     Serial.print(",");
     
     Serial.print(mcerpm);
+    Serial.print(",");
+
+    Serial.print(speed);
     Serial.print(",");
 
     Serial.print(mcthrottle);
@@ -262,7 +373,18 @@ void loop()
     Serial.print(low_temp);
     Serial.print(",");
 
+    Serial.print(lv);
+    Serial.print(",");
+     
+    Serial.print(mcvoltage);
+    Serial.print(",");
+
+    Serial.print(mcdccurrent);
+    Serial.print(",");
+    
+
     //Printing MFR data
+    /*
     present_time = millis();
     if(present_time>=(closedlooptime+500)){
       closedlooptime = present_time;
@@ -274,64 +396,67 @@ void loop()
       Serial.print('0');
       Serial.print(",");
     }
+    */
 
-    //Printing mc fault
+    // //Printing mc fault
     Serial.print(mcfault);
     Serial.print(";");
     
     //BMS faults
     if (rxId==2147485361){
+      String l = hex5 + hex6;
+      lv=(hexToDec(l))/10;
       
-      //DTC FLAGS #1
+      //DTC FLAGS #1 - type of BMS fault
       int a=(buf[0]);
       int flag1[8];
       decToBinary(a, flag1, 8);
     
       if(flag1[7]==1)
       {
-        Serial.print("P0A10 (Pack Too Hot Fault)");
+        Serial.print("Pack Too Hot Fault                ");
         Serial.print(":");
         bms_fault_check += 1;
       }
       if(flag1[6]==1)
       {
-        Serial.print(" P0A0E (Lowest Cell Voltage Too Low Fault)");
+        Serial.print("Lowest Cell Voltage Too Low       ");
         Serial.print(":");
         bms_fault_check += 1;
       }
       if(flag1[5]==1)
       {
-        Serial.print("P0A0C (Highest Cell Voltage Too High Fault)");
+        Serial.print("Highest Cell Voltage Too High     ");
         Serial.print(":");
         bms_fault_check += 1;
       }
       if(flag1[4]==1)
       {
-        Serial.print("P0A0B (Internal Software Fault)");
+        Serial.print("Internal Software Fault           ");
         Serial.print(":");
         bms_fault_check += 1;
       }
       if(flag1[3]==1)
       {
-        Serial.print(" P0A0A (Internal Heatsink Thermistor Fault)");
+        Serial.print("Internal Heatsink Thermistor Fault");
         Serial.print(":");
         bms_fault_check += 1;
       }
       if(flag1[2]==1)
       {
-        Serial.print("P0A09 (Internal Hardware Fault)");
+        Serial.print("Internal Hardware Fault           ");
         Serial.print(":");
         bms_fault_check += 1;
       }
       if(flag1[1]==1)
       {
-        Serial.print("P0A08 (Charger Safety Relay Fault)");
+        Serial.print("Charger Safety Relay Fault        ");
         Serial.print(":");
         bms_fault_check += 1;
       }
       if(flag1[0]==1)
       {
-        Serial.print("P0A07 (Discharge Limit Enforcement Fault)");
+        Serial.print("Discharge Limit Enforcement Fault ");
         Serial.print(":");
         bms_fault_check += 1;
       }
@@ -345,49 +470,49 @@ void loop()
       
       if(flag2[7]==1)
       {
-        Serial.print("P0A0F (Cell ASIC Fault)");
+        Serial.print("Cell ASIC Fault                   ");
         Serial.print(":");
         bms_fault_check += 1;
       }
       if(flag2[6]==1)
       {
-        Serial.print(" P0A0D (Highest Cell Voltage Over 5V Fault)");
+        Serial.print("Highest Cell Voltage Over 5V Fault");
         Serial.print(":");
         bms_fault_check += 1;
       }
       if(flag2[5]==1)
       {
-        Serial.print("P0AC0 (Current Sensor Fault)");
+        Serial.print("Current Sensor Fault              ");
         Serial.print(":");
         bms_fault_check += 1;
       }
       if(flag2[4]==1)
       {
-        Serial.print("P0A04 (Open Wiring Fault)");
+        Serial.print("Open Wiring Fault                 ");
         Serial.print(":");
         bms_fault_check += 1;
       }
       if(flag2[3]==1)
       {
-        Serial.print("P0AFA (Low Cell Voltage Fault)");
+        Serial.print("Low Cell Voltage Fault            ");
         Serial.print(":");
         bms_fault_check += 1;
       }
       if(flag2[2]==1)
       {
-        Serial.print("P0A80 (Weak Cell Fault)");
+        Serial.print("Weak Cell Fault                   ");
         Serial.print(":");
         bms_fault_check += 1;
       }
       if(flag2[1]==1)
       {
-        Serial.print("P0A12 (Cell Balancing Stuck Off Fault)");
+        Serial.print("Cell Balancing Stuck Off Fault    ");
         Serial.print(":");
         bms_fault_check += 1;
       }
       if(flag2[0]==1)
       {
-        Serial.print("P0A1F (Internal Communication Fault)");
+        Serial.print("Internal Communication Fault      ");
         Serial.print(":");
         bms_fault_check += 1;
       }
@@ -400,49 +525,49 @@ void loop()
       
       if(flag3[7]==1)
       {
-        Serial.print("P0A06 (Charge Limit Enforcement Fault)");
+        Serial.print("Charge Limit Enforcement Fault    ");
         Serial.print(":");
         bms_fault_check += 1;
       }
       if(flag3[6]==1)
       {
-        Serial.print("P0A05 (Input Power Supply Fault)");
+        Serial.print("Input Power Supply Fault          ");
         Serial.print(":");
         bms_fault_check += 1;
       }
       if(flag3[5]==1)
       {
-        Serial.print("P0AA6 (High Voltage Isolation Fault)");
+        Serial.print("High Voltage Isolation Fault      ");
         Serial.print(":");
         bms_fault_check += 1;
       }
       if(flag3[4]==1)
       {
-        Serial.print("P0560 (Redundant Power Supply Fault)");
+        Serial.print("Redundant Power Supply Fault      ");
         Serial.print(":");
         bms_fault_check += 1;
       }
       if(flag3[3]==1)
       {
-        Serial.print("U0100 (External Communication Fault)");
+        Serial.print("External Communication Fault      ");
         Serial.print(":");
         bms_fault_check += 1;
       }
       if(flag3[2]==1)
       {
-        Serial.print("P0A9C (Thermistor Fault)");
+        Serial.print("Thermistor Fault                  ");
         Serial.print(":");
         bms_fault_check += 1;
       }
       if(flag3[1]==1)
       {
-        Serial.print("P0A81 (Fan Monitor Fault)");
+        Serial.print("Fan Monitor Fault                 ");
         Serial.print(":");
         bms_fault_check += 1;
       }
       if(flag3[0]==1)
       {
-        Serial.print("P0A02 (Weak Pack Fault)");
+        Serial.print("Weak Pack Fault                   ");
         Serial.print(":");
         bms_fault_check += 1;
       }
@@ -453,19 +578,9 @@ void loop()
       Serial.print(":");
     }
 
-    
-    //HC12  LOOP
-    while(Serial.available()){
-      HC12.write(pack_current);
-      HC12.write(pack_inst_voltage);
-      HC12.write(state_of_charge);
-      HC12.write(high_temp);
-      HC12.write(low_temp);
-    }
-    
     Serial.println();
     
     //giving delay
-    delay(100);
+    delay(0);
   }
 }
